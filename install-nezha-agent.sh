@@ -164,13 +164,20 @@ RestartSec=3
 [Install]
 WantedBy=default.target"
 
+    # 写入用户服务文件
     sudo_cmd -u "$install_user" mkdir -p "$user_home/.config/systemd/user"
-    echo "$SERVICE_FILE" | sudo_cmd tee "$user_home/.config/systemd/user/nezha-agent.service" >/dev/null
+    echo "$SERVICE_FILE" | sudo_cmd -u "$install_user" tee "$user_home/.config/systemd/user/nezha-agent.service" >/dev/null
 
+    # 启用 linger
     sudo_cmd loginctl enable-linger "$install_user"
-    sudo_cmd -u "$install_user" systemctl --user daemon-reexec
-    sudo_cmd -u "$install_user" systemctl --user daemon-reload
-    sudo_cmd -u "$install_user" systemctl --user enable --now nezha-agent.service
+
+    # 设置环境变量以确保 XDG_RUNTIME_DIR 正确
+    ENV_COMMAND="export XDG_RUNTIME_DIR=/run/user/$(id -u "$install_user")"
+
+    # 以非 root 身份启动 systemd --user
+    sudo_cmd -u "$install_user" bash -c "$ENV_COMMAND && systemctl --user daemon-reexec"
+    sudo_cmd -u "$install_user" bash -c "$ENV_COMMAND && systemctl --user daemon-reload"
+    sudo_cmd -u "$install_user" bash -c "$ENV_COMMAND && systemctl --user enable --now nezha-agent.service"
 
     success "已使用 systemd --user 启动 nezha-agent，用户：$install_user"
 }
