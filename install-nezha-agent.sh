@@ -97,7 +97,7 @@ install_agent() {
 
     echo
     echo "[2/6] 选择 Agent 版本（留空默认最新版）"
-    latest_tag=$(curl -s "https://api.github.com/repos/naiba/nezha/releases/latest" | jq -r .tag_name)
+    latest_tag=$(curl -s "${proxy}https://github.com/nezhahq/agent/releases/latest/download/nezha-agent_${os}_${os_arch}.zip" | jq -r .tag_name)
     echo "可用版本：$latest_tag"
     read -rp "输入版本号 [默认：$latest_tag]: " version
     version=${version:-$latest_tag}
@@ -105,7 +105,7 @@ install_agent() {
     echo
     echo "[3/6] 下载 Nezha Agent..."
     proxy=$(gh_proxy)
-    agent_url="${proxy}https://github.com/naiba/nezha/releases/download/${version}/nezha-agent-${os}-${os_arch}.zip"
+    agent_url="${proxy}https://github.com/nezhahq/agent/releases/${version}/download/nezha-agent_${os}_${os_arch}.zip"
     tmp_dir=$(mktemp -d)
     wget -qO "$tmp_dir/agent.zip" "$agent_url" || { err "下载失败"; exit 1; }
     unzip -q "$tmp_dir/agent.zip" -d "$tmp_dir/"
