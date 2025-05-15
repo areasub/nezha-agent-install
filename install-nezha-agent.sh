@@ -3,7 +3,7 @@
 set -e
 
 print_help() {
-    echo "Nezha Agent 非 root 安装脚本"
+    echo "Nezha Agent 安装脚本"
     echo
     echo "用法："
     echo "  bash <(curl -Ls https://xxx/nezha-agent.sh) [选项]"
@@ -12,7 +12,7 @@ print_help() {
     echo "  install    安装并配置 Agent（默认）"
     echo "  uninstall  卸载 Agent"
     echo "  config     重新配置 Agent"
-    echo "  help       显示本帮助信息"
+    echo "  help       显示帮助信息"
     echo
 }
 
@@ -27,7 +27,7 @@ info() {
 deps_check() {
     for dep in wget unzip grep curl jq; do
         if ! command -v "$dep" >/dev/null 2>&1; then
-            err "$dep 未安装，请先安装依赖"
+            err "$dep 未安装，请先安装"
             exit 1
         fi
     done
@@ -71,25 +71,39 @@ install_agent() {
     geo_check
     env_check
 
-    read -rp "请输入运行该 Agent 的非 root 用户名：" username
-    if ! id "$username" &>/dev/null; then
-        err "用户不存在"
-        exit 1
+    echo
+    echo "[1/6] 选择安装模式"
+    echo "1) 非 root 用户安装（推荐）"
+    echo "2) root 用户安装"
+    read -rp "请输入选项 [1]: " user_mode
+    user_mode=${user_mode:-1}
+
+    if [[ "$user_mode" == "1" ]]; then
+        username="nezha"
+        if ! id "$username" &>/dev/null; then
+            echo "用户 $username 不存在，正在创建..."
+            useradd -m "$username"
+        fi
+        run_as_user=true
+    else
+        username="root"
+        run_as_user=false
     fi
 
     install_dir="/home/$username/nezha-agent"
+    [[ "$username" == "root" ]] && install_dir="/root/nezha-agent"
     mkdir -p "$install_dir"
     chown "$username:$username" "$install_dir"
 
     echo
-    echo "[1/6] 选择 Agent 版本"
+    echo "[2/6] 选择 Agent 版本（留空默认最新版）"
     latest_tag=$(curl -s "https://api.github.com/repos/naiba/nezha/releases/latest" | jq -r .tag_name)
     echo "可用版本：$latest_tag"
-    read -rp "输入版本号（留空则使用 $latest_tag）: " version
-    [[ -z "$version" ]] && version="$latest_tag"
+    read -rp "输入版本号 [默认：$latest_tag]: " version
+    version=${version:-$latest_tag}
 
     echo
-    echo "[2/6] 下载 Nezha Agent..."
+    echo "[3/6] 下载 Nezha Agent..."
     proxy=$(gh_proxy)
     agent_url="${proxy}https://github.com/naiba/nezha/releases/download/${version}/nezha-agent-${os}-${os_arch}.zip"
     tmp_dir=$(mktemp -d)
@@ -101,33 +115,35 @@ install_agent() {
     rm -rf "$tmp_dir"
 
     echo
-    echo "[3/6] 配置服务器地址与密钥"
-    read -rp "服务器地址（格式 example.com:5555）: " server_addr
-    read -rp "客户端密钥（UUID）: " secret
+    echo "[4/6] 配置服务器信息"
+    read -rp "请输入服务端地址 (格式 example.com:5555): " server_addr
+    read -rp "请输入客户端密钥 (UUID): " secret
     read -rp "是否启用 TLS？(1=否, 2=是) [默认2]: " use_tls
     use_tls=${use_tls:-2}
 
-    cat > "/home/$username/nezha-agent.conf" <<EOF
+    config_file="/home/$username/nezha-agent.conf"
+    [[ "$username" == "root" ]] && config_file="/root/nezha-agent.conf"
+    cat > "$config_file" <<EOF
 {
   "server": "$server_addr",
   "tls": $([[ "$use_tls" == "2" ]] && echo true || echo false),
   "client_secret": "$secret"
 }
 EOF
-    chown "$username:$username" "/home/$username/nezha-agent.conf"
+    chown "$username:$username" "$config_file"
 
     echo
-    echo "[4/6] 创建 systemd 服务"
+    echo "[5/6] 创建 systemd 服务"
     cat > /etc/systemd/system/nezha-agent.service <<EOF
 [Unit]
-Description=Nezha Agent (Non-root)
+Description=Nezha Agent (${username})
 After=network.target
 
 [Service]
 Type=simple
 User=$username
 WorkingDirectory=$install_dir
-ExecStart=$install_dir/nezha-agent --config /home/$username/nezha-agent.conf
+ExecStart=$install_dir/nezha-agent --config $config_file
 Restart=always
 
 [Install]
@@ -135,13 +151,13 @@ WantedBy=multi-user.target
 EOF
 
     echo
-    echo "[5/6] 启动并设置开机自启"
+    echo "[6/6] 启动并设置开机自启"
     systemctl daemon-reexec
     systemctl daemon-reload
     systemctl enable --now nezha-agent.service
 
     echo
-    echo "[6/6] 当前运行状态："
+    echo "✅ 安装完成，当前运行状态如下："
     systemctl status nezha-agent.service --no-pager
 }
 
@@ -150,36 +166,39 @@ uninstall_agent() {
     systemctl disable --now nezha-agent.service 2>/dev/null || true
     rm -f /etc/systemd/system/nezha-agent.service
     systemctl daemon-reload
-    echo "如需手动删除文件，请清理用户目录下的 nezha-agent 与配置文件"
+    echo "如需手动清理，请删除 ~/nezha-agent 及配置文件"
     echo "卸载完成"
 }
 
 reconfig_agent() {
     echo "重新配置 Nezha Agent..."
-    read -rp "请输入运行该 Agent 的非 root 用户名：" username
-    [[ -z "$username" || ! -d "/home/$username" ]] && err "用户无效" && exit 1
+    read -rp "请输入运行该 Agent 的用户名（默认 nezha）: " username
+    username=${username:-nezha}
+    [[ ! -d "/home/$username" && "$username" != "root" ]] && err "无效用户" && exit 1
+
+    config_file="/home/$username/nezha-agent.conf"
+    [[ "$username" == "root" ]] && config_file="/root/nezha-agent.conf"
 
     read -rp "服务器地址（格式 example.com:5555）: " server_addr
     read -rp "客户端密钥（UUID）: " secret
     read -rp "是否启用 TLS？(1=否, 2=是) [默认2]: " use_tls
     use_tls=${use_tls:-2}
 
-    cat > "/home/$username/nezha-agent.conf" <<EOF
+    cat > "$config_file" <<EOF
 {
   "server": "$server_addr",
   "tls": $([[ "$use_tls" == "2" ]] && echo true || echo false),
   "client_secret": "$secret"
 }
 EOF
-    chown "$username:$username" "/home/$username/nezha-agent.conf"
+    chown "$username:$username" "$config_file"
 
     systemctl restart nezha-agent.service
-    echo "重新配置完成"
+    echo "重新配置完成 ✅"
 }
 
 main() {
-    action="$1"
-    case "$action" in
+    case "$1" in
         uninstall) uninstall_agent ;;
         config) reconfig_agent ;;
         help) print_help ;;
