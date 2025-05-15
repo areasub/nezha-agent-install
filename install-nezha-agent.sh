@@ -21,10 +21,9 @@ info() {
 }
 
 sudo_cmd() {
-    myEUID=$(id -ru)
-    if [ "$myEUID" -ne 0 ]; then
+    if [ "$(id -ru)" -ne 0 ]; then
         if command -v sudo > /dev/null 2>&1; then
-            command sudo "$@"
+            sudo "$@"
         else
             err "ERROR: sudo is not installed on the system, the action cannot be proceeded."
             exit 1
@@ -34,9 +33,18 @@ sudo_cmd() {
     fi
 }
 
+run_as_user() {
+    local user="$1"
+    shift
+    if [ "$(id -u)" -eq "$(id -u "$user")" ]; then
+        "$@"
+    else
+        sudo -u "$user" "$@"
+    fi
+}
+
 deps_check() {
-    deps="wget unzip grep curl"
-    for dep in $deps; do
+    for dep in wget unzip grep curl; do
         if ! command -v "$dep" >/dev/null 2>&1; then
             err "$dep not found, please install it first."
             exit 1
@@ -45,11 +53,8 @@ deps_check() {
 }
 
 geo_check() {
-    api_list="https://blog.cloudflare.com/cdn-cgi/trace https://developers.cloudflare.com/cdn-cgi/trace"
-    ua="Mozilla/5.0"
-    for url in $api_list; do
-        text="$(curl -A "$ua" -m 10 -s "$url")"
-        if echo "$text" | grep -qw 'CN'; then
+    for url in https://blog.cloudflare.com/cdn-cgi/trace https://developers.cloudflare.com/cdn-cgi/trace; do
+        if curl -A "Mozilla/5.0" -m 10 -s "$url" | grep -qw 'CN'; then
             isCN=true
             break
         fi
@@ -57,8 +62,7 @@ geo_check() {
 }
 
 env_check() {
-    mach=$(uname -m)
-    case "$mach" in
+    case "$(uname -m)" in
         amd64|x86_64) os_arch="amd64" ;;
         i386|i686) os_arch="386" ;;
         aarch64|arm64) os_arch="arm64" ;;
@@ -67,13 +71,13 @@ env_check() {
         riscv64) os_arch="riscv64" ;;
         mips) os_arch="mips" ;;
         mipsel|mipsle) os_arch="mipsle" ;;
-        *) err "Unknown architecture: $mach"; exit 1 ;;
+        *) err "Unknown architecture"; exit 1 ;;
     esac
 
     case "$(uname)" in
-        *Linux*) os="linux" ;;
-        *Darwin*) os="darwin" ;;
-        *FreeBSD*) os="freebsd" ;;
+        Linux) os="linux" ;;
+        Darwin) os="darwin" ;;
+        FreeBSD) os="freebsd" ;;
         *) err "Unknown OS"; exit 1 ;;
     esac
 }
@@ -115,25 +119,17 @@ init() {
     deps_check
     env_check
     geo_check
-
-    if [ -n "$isCN" ]; then
-        CN=true
-    fi
-
-    if [ -z "$CN" ]; then
-        GITHUB_URL="github.com"
-    else
-        GITHUB_URL="gitee.com"
-    fi
+    CN=""
+    [ -n "$isCN" ] && CN="true"
 }
 
 download_agent() {
     info "正在下载 Nezha Agent..."
     if [ -z "$CN" ]; then
-        NZ_AGENT_URL="https://${GITHUB_URL}/nezhahq/agent/releases/latest/download/nezha-agent_${os}_${os_arch}.zip"
+        NZ_AGENT_URL="https://github.com/nezhahq/agent/releases/latest/download/nezha-agent_${os}_${os_arch}.zip"
     else
-        _version=$(curl -m 10 -sL "https://gitee.com/api/v5/repos/naibahq/agent/releases/latest" | awk -F '"' '{for(i=1;i<=NF;i++){if($i=="tag_name"){print $(i+2)}}}')
-        NZ_AGENT_URL="https://${GITHUB_URL}/naibahq/agent/releases/download/${_version}/nezha-agent_${os}_${os_arch}.zip"
+        version=$(curl -m 10 -sL "https://gitee.com/api/v5/repos/naibahq/agent/releases/latest" | awk -F '"' '{for(i=1;i<=NF;i++){if($i=="tag_name"){print $(i+2)}}}')
+        NZ_AGENT_URL="https://gitee.com/naibahq/agent/releases/download/${version}/nezha-agent_${os}_${os_arch}.zip"
     fi
 
     wget -T 60 -O /tmp/nezha-agent_${os}_${os_arch}.zip "$NZ_AGENT_URL" >/dev/null 2>&1 || {
@@ -145,8 +141,8 @@ download_agent() {
 install_as_non_root() {
     user_home=$(eval echo "~$install_user")
     AGENT_DIR="$user_home/nezha"
-    sudo_cmd -u "$install_user" mkdir -p "$AGENT_DIR"
-    sudo_cmd unzip -qo /tmp/nezha-agent_${os}_${os_arch}.zip -d "$AGENT_DIR"
+    run_as_user "$install_user" mkdir -p "$AGENT_DIR"
+    run_as_user "$install_user" unzip -qo /tmp/nezha-agent_${os}_${os_arch}.zip -d "$AGENT_DIR"
     sudo_cmd rm -f /tmp/nezha-agent_${os}_${os_arch}.zip
 
     TLS_OPTION=""
@@ -164,20 +160,13 @@ RestartSec=3
 [Install]
 WantedBy=default.target"
 
-    # 写入用户服务文件
-    sudo_cmd -u "$install_user" mkdir -p "$user_home/.config/systemd/user"
-    echo "$SERVICE_FILE" | sudo_cmd -u "$install_user" tee "$user_home/.config/systemd/user/nezha-agent.service" >/dev/null
+    run_as_user "$install_user" mkdir -p "$user_home/.config/systemd/user"
+    echo "$SERVICE_FILE" | sudo_cmd tee "$user_home/.config/systemd/user/nezha-agent.service" >/dev/null
 
-    # 启用 linger
     sudo_cmd loginctl enable-linger "$install_user"
-
-    # 设置环境变量以确保 XDG_RUNTIME_DIR 正确
-    ENV_COMMAND="export XDG_RUNTIME_DIR=/run/user/$(id -u "$install_user")"
-
-    # 以非 root 身份启动 systemd --user
-    sudo_cmd -u "$install_user" bash -c "$ENV_COMMAND && systemctl --user daemon-reexec"
-    sudo_cmd -u "$install_user" bash -c "$ENV_COMMAND && systemctl --user daemon-reload"
-    sudo_cmd -u "$install_user" bash -c "$ENV_COMMAND && systemctl --user enable --now nezha-agent.service"
+    run_as_user "$install_user" systemctl --user daemon-reexec
+    run_as_user "$install_user" systemctl --user daemon-reload
+    run_as_user "$install_user" systemctl --user enable --now nezha-agent.service
 
     success "已使用 systemd --user 启动 nezha-agent，用户：$install_user"
 }
@@ -216,8 +205,8 @@ uninstall() {
         read -rp "请输入用户（默认 nezha）: " user
         user=${user:-nezha}
         user_home=$(eval echo "~$user")
-        sudo_cmd -u "$user" systemctl --user stop nezha-agent.service
-        sudo_cmd -u "$user" systemctl --user disable nezha-agent.service
+        run_as_user "$user" systemctl --user stop nezha-agent.service
+        run_as_user "$user" systemctl --user disable nezha-agent.service
         sudo_cmd rm -f "$user_home/.config/systemd/user/nezha-agent.service"
         info "已卸载用户 $user 的 systemd 服务"
     fi
